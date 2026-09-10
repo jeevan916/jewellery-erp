@@ -19,9 +19,7 @@ class AccountGroup(models.Model):
     is_active = models.BooleanField(default=True)
 
     class Meta:
-        constraints = [
-            models.UniqueConstraint(fields=["code"], name="uq_account_group_code"),
-        ]
+        constraints = [models.UniqueConstraint(fields=["code"], name="uq_account_group_code")]
         ordering = ["code"]
 
     def __str__(self):
@@ -47,10 +45,7 @@ class Account(models.Model):
     class Meta:
         constraints = [
             models.UniqueConstraint(fields=["code"], name="uq_account_code"),
-            models.CheckConstraint(
-                condition=Q(is_cash=False) | Q(is_bank=False),
-                name="account_not_both_cash_and_bank",
-            ),
+            models.CheckConstraint(condition=Q(is_cash=False) | Q(is_bank=False), name="account_not_both_cash_and_bank"),
         ]
         ordering = ["code"]
 
