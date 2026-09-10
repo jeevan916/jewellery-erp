@@ -4,7 +4,7 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 
-from apps.accounting.models import FinancialPeriod, JournalEntry, JournalEntryLine, Voucher
+from apps.accounting.models import Account, FinancialPeriod, JournalEntry, JournalEntryLine, Voucher
 
 
 class PostingError(ValidationError):
@@ -28,20 +28,35 @@ def post_voucher(*, voucher_id: int, lines: list[dict], period_id: int) -> Journ
     total_debit = Decimal("0.0000")
     total_credit = Decimal("0.0000")
     normalized = []
+    account_ids = set()
     for index, item in enumerate(lines, start=1):
-        debit = Decimal(str(item.get("debit", "0")))
-        credit = Decimal(str(item.get("credit", "0")))
+        try:
+            debit = Decimal(str(item.get("debit", "0")))
+            credit = Decimal(str(item.get("credit", "0")))
+        except Exception as exc:
+            raise PostingError(f"Invalid amount on journal line {index}.") from exc
         if debit < 0 or credit < 0 or (debit > 0 and credit > 0) or (debit == 0 and credit == 0):
             raise PostingError(f"Invalid journal line {index}.")
         account_id = item.get("account_id")
         if not account_id:
             raise PostingError(f"Account is required on journal line {index}.")
         normalized.append((account_id, debit, credit, item.get("narration", "")))
+        account_ids.add(account_id)
         total_debit += debit
         total_credit += credit
 
     if total_debit != total_credit or total_debit <= 0:
         raise PostingError("Journal entry must have equal, positive debit and credit totals.")
+
+    locked_accounts = list(
+        Account.objects.select_for_update().filter(id__in=account_ids)
+    )
+    active_ids = {account.id for account in locked_accounts if account.is_active}
+    missing_or_inactive = account_ids - active_ids
+    if missing_or_inactive:
+        raise PostingError(
+            f"Journal entry contains missing or inactive account(s): {sorted(missing_or_inactive)}"
+        )
 
     entry = JournalEntry.objects.create(
         voucher=voucher,
@@ -52,7 +67,14 @@ def post_voucher(*, voucher_id: int, lines: list[dict], period_id: int) -> Journ
         total_credit=total_credit,
     )
     JournalEntryLine.objects.bulk_create([
-        JournalEntryLine(journal_entry=entry, account_id=account_id, line_no=index, debit=debit, credit=credit, narration=narration)
+        JournalEntryLine(
+            journal_entry=entry,
+            account_id=account_id,
+            line_no=index,
+            debit=debit,
+            credit=credit,
+            narration=narration,
+        )
         for index, (account_id, debit, credit, narration) in enumerate(normalized, start=1)
     ])
     voucher.status = Voucher.Status.POSTED
