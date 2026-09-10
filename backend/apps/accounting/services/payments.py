@@ -2,7 +2,7 @@ from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Q, Sum
 
 from apps.accounting.models import (
     Account,
@@ -89,16 +89,15 @@ def post_payment(*, payment_id, financial_period_id, account_id):
 
 
 def active_allocated(*, payment_id=None, bill_id=None):
-    qs = PaymentAllocation.objects.all()
     if payment_id is not None:
-        qs = qs.filter(payment_id=payment_id)
+        qs = PaymentAllocation.objects.filter(payment_id=payment_id)
     elif bill_id is not None:
-        qs = qs.filter(bill_id=bill_id)
+        qs = PaymentAllocation.objects.filter(bill_id=bill_id)
     else:
         raise ValueError("payment_id or bill_id is required")
     totals = qs.aggregate(
-        allocated=Sum("amount", filter=__import__("django.db.models", fromlist=["Q"]).Q(entry_type=PaymentAllocation.EntryType.ALLOCATE)),
-        deallocated=Sum("amount", filter=__import__("django.db.models", fromlist=["Q"]).Q(entry_type=PaymentAllocation.EntryType.DEALLOCATE)),
+        allocated=Sum("amount", filter=Q(entry_type=PaymentAllocation.EntryType.ALLOCATE)),
+        deallocated=Sum("amount", filter=Q(entry_type=PaymentAllocation.EntryType.DEALLOCATE)),
     )
     return max((totals["allocated"] or ZERO) - (totals["deallocated"] or ZERO), ZERO)
 
@@ -151,7 +150,6 @@ def deallocate_payment(*, allocation_id, amount=None):
         amount=amount,
         reference_allocation=allocation,
     )
-    # Recalculate the bill's active allocation after the append-only reversal.
     active_bill_allocation = active_allocated(bill_id=allocation.bill_id)
     bill_status = BillReference.Status.SETTLED if active_bill_allocation == allocation.bill.amount else BillReference.Status.OPEN
     BillReference.objects.filter(pk=allocation.bill_id).update(status=bill_status)
