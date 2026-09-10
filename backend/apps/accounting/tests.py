@@ -3,7 +3,17 @@ from decimal import Decimal
 
 from django.test import TestCase
 
-from apps.accounting.models import Account, AccountGroup, FinancialPeriod, Voucher, VoucherType
+from apps.accounting.models import (
+    Account,
+    AccountGroup,
+    BillReference,
+    FinancialPeriod,
+    Party,
+    Payment,
+    Voucher,
+    VoucherType,
+)
+from apps.accounting.services.billwise import BillWiseError, allocate_payment, deallocate_payment
 from apps.accounting.services.posting import PostingError, post_voucher
 
 
@@ -57,3 +67,101 @@ class PostingTests(TestCase):
                 {"account_id": self.cash.id, "debit": "100", "credit": "100"},
                 {"account_id": self.sales.id, "credit": "100"},
             ])
+
+
+class BillWiseAllocationTests(TestCase):
+    def setUp(self):
+        assets = AccountGroup.objects.create(code="1000", name="Assets", nature=AccountGroup.Nature.ASSET)
+        receivables = AccountGroup.objects.create(code="1100", name="Receivables", nature=AccountGroup.Nature.ASSET)
+        self.customer_account = Account.objects.create(
+            code="1101", name="Customer A", group=receivables, is_party_account=True
+        )
+        self.supplier_account = Account.objects.create(
+            code="2101", name="Supplier A", group=AccountGroup.objects.create(
+                code="2000", name="Liabilities", nature=AccountGroup.Nature.LIABILITY
+            ), is_party_account=True
+        )
+        self.cash = Account.objects.create(code="1001", name="Cash", group=assets, is_cash=True)
+        self.vtype = VoucherType.objects.create(code="RCPT", name="Receipt", category="RECEIPT")
+        self.party = Party.objects.create(
+            code="C001", name="Customer A", party_type=Party.PartyType.CUSTOMER, account=self.customer_account
+        )
+
+    def make_payment(self, amount="1000.00", payment_type=Payment.PaymentType.RECEIPT, number="1"):
+        voucher = Voucher.objects.create(voucher_type=self.vtype, number=number, voucher_date=date(2026, 9, 10), status=Voucher.Status.POSTED)
+        return Payment.objects.create(
+            party=self.party,
+            voucher=voucher,
+            payment_date=date(2026, 9, 10),
+            payment_type=payment_type,
+            amount=amount,
+            status=Payment.Status.POSTED,
+        )
+
+    def make_bill(self, amount="1000.00", number="INV-1"):
+        voucher = Voucher.objects.create(voucher_type=self.vtype, number=f"B-{number}", voucher_date=date(2026, 9, 10), status=Voucher.Status.POSTED)
+        return BillReference.objects.create(
+            party=self.party,
+            voucher=voucher,
+            bill_number=number,
+            bill_date=date(2026, 9, 10),
+            bill_type=BillReference.BillType.RECEIVABLE,
+            amount=amount,
+        )
+
+    def test_partial_payment_and_multiple_invoices(self):
+        payment = self.make_payment("1000.00")
+        bill1 = self.make_bill("600.00", "INV-1")
+        bill2 = self.make_bill("800.00", "INV-2")
+
+        allocate_payment(payment_id=payment.id, bill_id=bill1.id, amount="400.00")
+        allocate_payment(payment_id=payment.id, bill_id=bill2.id, amount="600.00")
+
+        bill1.refresh_from_db()
+        bill2.refresh_from_db()
+        payment.refresh_from_db()
+        self.assertEqual(bill1.outstanding_amount, Decimal("200.0000"))
+        self.assertEqual(bill2.outstanding_amount, Decimal("200.0000"))
+        self.assertEqual(payment.unallocated_amount, Decimal("0.0000"))
+
+    def test_over_allocation_is_rejected(self):
+        payment = self.make_payment("500.00")
+        bill = self.make_bill("400.00")
+        with self.assertRaises(BillWiseError):
+            allocate_payment(payment_id=payment.id, bill_id=bill.id, amount="500.00")
+        self.assertEqual(bill.allocations.count(), 0)
+
+    def test_overpayment_remains_unallocated_advance(self):
+        payment = self.make_payment("1000.00")
+        bill = self.make_bill("600.00")
+        allocate_payment(payment_id=payment.id, bill_id=bill.id, amount="600.00")
+        payment.refresh_from_db()
+        self.assertEqual(payment.unallocated_amount, Decimal("400.0000"))
+        self.assertEqual(bill.outstanding_amount, Decimal("0.0000"))
+
+    def test_wrong_party_cannot_be_allocated(self):
+        other_account = Account.objects.create(
+            code="1102", name="Customer B", group=self.customer_account.group, is_party_account=True
+        )
+        other_party = Party.objects.create(
+            code="C002", name="Customer B", party_type=Party.PartyType.CUSTOMER, account=other_account
+        )
+        payment = self.make_payment()
+        voucher = Voucher.objects.create(voucher_type=self.vtype, number="B-OTHER", voucher_date=date(2026, 9, 10), status=Voucher.Status.POSTED)
+        bill = BillReference.objects.create(
+            party=other_party, voucher=voucher, bill_number="INV-X", bill_date=date(2026, 9, 10),
+            bill_type=BillReference.BillType.RECEIVABLE, amount="100.00"
+        )
+        with self.assertRaises(BillWiseError):
+            allocate_payment(payment_id=payment.id, bill_id=bill.id, amount="100.00")
+
+    def test_deallocation_reopens_settled_bill(self):
+        payment = self.make_payment("500.00")
+        bill = self.make_bill("500.00")
+        allocation = allocate_payment(payment_id=payment.id, bill_id=bill.id, amount="500.00")
+        bill.refresh_from_db()
+        self.assertEqual(bill.status, BillReference.Status.SETTLED)
+        deallocate_payment(allocation_id=allocation.id)
+        bill.refresh_from_db()
+        self.assertEqual(bill.status, BillReference.Status.OPEN)
+        self.assertEqual(bill.outstanding_amount, Decimal("500.0000"))
