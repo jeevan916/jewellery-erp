@@ -8,10 +8,7 @@ class Migration(migrations.Migration):
     dependencies = []
     operations = [
         migrations.CreateModel(name="AccountGroup", fields=[
-            ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
-            ("name", models.CharField(max_length=120)), ("code", models.CharField(max_length=40)),
-            ("nature", models.CharField(choices=[("ASSET", "Asset"), ("LIABILITY", "Liability"), ("EQUITY", "Equity"), ("INCOME", "Income"), ("EXPENSE", "Expense")], max_length=12)), ("is_system", models.BooleanField(default=False)), ("is_active", models.BooleanField(default=True)),
-            ("parent", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name="children", to="accounting.accountgroup")),
+            ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")), ("name", models.CharField(max_length=120)), ("code", models.CharField(max_length=40)), ("nature", models.CharField(choices=[("ASSET", "Asset"), ("LIABILITY", "Liability"), ("EQUITY", "Equity"), ("INCOME", "Income"), ("EXPENSE", "Expense")], max_length=12)), ("is_system", models.BooleanField(default=False)), ("is_active", models.BooleanField(default=True)), ("parent", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name="children", to="accounting.accountgroup")),
         ], options={"ordering": ["code"]}),
         migrations.CreateModel(name="FinancialPeriod", fields=[
             ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")), ("name", models.CharField(max_length=80)), ("starts_on", models.DateField()), ("ends_on", models.DateField()), ("status", models.CharField(choices=[("OPEN", "Open"), ("CLOSED", "Closed"), ("LOCKED", "Locked")], default="OPEN", max_length=10)),
