@@ -8,7 +8,7 @@ from apps.accounting.models import FinancialPeriod, JournalEntry, JournalEntryLi
 
 
 class PostingError(ValidationError):
-    """Raised when a financial voucher cannot be posted safely."""
+    pass
 
 
 @transaction.atomic
@@ -28,7 +28,6 @@ def post_voucher(*, voucher_id: int, lines: list[dict], period_id: int) -> Journ
     total_debit = Decimal("0.0000")
     total_credit = Decimal("0.0000")
     normalized = []
-
     for index, item in enumerate(lines, start=1):
         debit = Decimal(str(item.get("debit", "0")))
         credit = Decimal(str(item.get("credit", "0")))
@@ -53,17 +52,9 @@ def post_voucher(*, voucher_id: int, lines: list[dict], period_id: int) -> Journ
         total_credit=total_credit,
     )
     JournalEntryLine.objects.bulk_create([
-        JournalEntryLine(
-            journal_entry=entry,
-            account_id=account_id,
-            line_no=index,
-            debit=debit,
-            credit=credit,
-            narration=narration,
-        )
+        JournalEntryLine(journal_entry=entry, account_id=account_id, line_no=index, debit=debit, credit=credit, narration=narration)
         for index, (account_id, debit, credit, narration) in enumerate(normalized, start=1)
     ])
-
     voucher.status = Voucher.Status.POSTED
     voucher.posted_at = timezone.now()
     voucher.save(update_fields=["status", "posted_at"])
