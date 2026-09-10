@@ -68,9 +68,13 @@ class BillReference(models.Model):
 
     @property
     def allocated_amount(self):
-        return self.allocations.filter(payment__status=Payment.Status.POSTED).aggregate(
+        allocated = self.allocations.filter(entry_type=PaymentAllocation.EntryType.ALLOCATE).aggregate(
             total=Sum("amount")
         )["total"] or Decimal("0.0000")
+        released = self.allocations.filter(entry_type=PaymentAllocation.EntryType.DEALLOCATE).aggregate(
+            total=Sum("amount")
+        )["total"] or Decimal("0.0000")
+        return max(allocated - released, Decimal("0.0000"))
 
     @property
     def outstanding_amount(self):
@@ -106,9 +110,13 @@ class Payment(models.Model):
 
     @property
     def allocated_amount(self):
-        return self.allocations.filter(payment__status=self.Status.POSTED).aggregate(
+        allocated = self.allocations.filter(entry_type=PaymentAllocation.EntryType.ALLOCATE).aggregate(
             total=Sum("amount")
         )["total"] or Decimal("0.0000")
+        released = self.allocations.filter(entry_type=PaymentAllocation.EntryType.DEALLOCATE).aggregate(
+            total=Sum("amount")
+        )["total"] or Decimal("0.0000")
+        return max(allocated - released, Decimal("0.0000"))
 
     @property
     def unallocated_amount(self):
@@ -116,21 +124,31 @@ class Payment(models.Model):
 
 
 class PaymentAllocation(models.Model):
+    class EntryType(models.TextChoices):
+        ALLOCATE = "ALLOCATE", "Allocate"
+        DEALLOCATE = "DEALLOCATE", "Deallocate"
+
     payment = models.ForeignKey(Payment, on_delete=models.PROTECT, related_name="allocations")
     bill = models.ForeignKey(BillReference, on_delete=models.PROTECT, related_name="allocations")
+    entry_type = models.CharField(max_length=10, choices=EntryType.choices, default=EntryType.ALLOCATE)
     amount = models.DecimalField(max_digits=19, decimal_places=4)
     allocated_at = models.DateTimeField(auto_now_add=True)
+    reference_allocation = models.ForeignKey(
+        "self", null=True, blank=True, on_delete=models.PROTECT, related_name="reversal_entries"
+    )
 
     class Meta:
-        constraints = [
-            models.UniqueConstraint(fields=["payment", "bill"], name="uq_payment_bill_allocation"),
-            models.CheckConstraint(condition=Q(amount__gt=0), name="allocation_amount_positive"),
+        constraints = [models.CheckConstraint(condition=Q(amount__gt=0), name="allocation_amount_positive")]
+        indexes = [
+            models.Index(fields=["bill", "payment", "entry_type"]),
+            models.Index(fields=["payment", "bill", "allocated_at"]),
         ]
-        indexes = [models.Index(fields=["bill", "payment"])]
 
     def clean(self):
         if self.payment_id and self.bill_id and self.payment.party_id != self.bill.party_id:
             raise ValidationError("Payment and bill must belong to the same party.")
+        if self.entry_type == self.EntryType.DEALLOCATE and not self.reference_allocation_id:
+            raise ValidationError("A deallocation must reference the allocation being reversed.")
 
     def __str__(self):
-        return f"{self.payment_id} -> {self.bill_id}: {self.amount}"
+        return f"{self.entry_type}: {self.payment_id} -> {self.bill_id}: {self.amount}"
