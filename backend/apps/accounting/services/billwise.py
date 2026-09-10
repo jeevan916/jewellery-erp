@@ -21,20 +21,24 @@ def _money(value) -> Decimal:
     return amount.quantize(Decimal("0.0001"))
 
 
-def get_bill_outstanding(bill_id: int) -> Decimal:
-    bill = BillReference.objects.get(pk=bill_id)
-    allocated = bill.allocations.filter(payment__status=Payment.Status.POSTED).aggregate(
+def _net_allocated(queryset) -> Decimal:
+    allocated = queryset.filter(entry_type=PaymentAllocation.EntryType.ALLOCATE).aggregate(
         total=Sum("amount")
     )["total"] or Decimal("0.0000")
-    return max(bill.amount - allocated, Decimal("0.0000"))
+    released = queryset.filter(entry_type=PaymentAllocation.EntryType.DEALLOCATE).aggregate(
+        total=Sum("amount")
+    )["total"] or Decimal("0.0000")
+    return max(allocated - released, Decimal("0.0000"))
+
+
+def get_bill_outstanding(bill_id: int) -> Decimal:
+    bill = BillReference.objects.get(pk=bill_id)
+    return max(bill.amount - _net_allocated(bill.allocations.all()), Decimal("0.0000"))
 
 
 def get_payment_unallocated(payment_id: int) -> Decimal:
     payment = Payment.objects.get(pk=payment_id)
-    allocated = payment.allocations.filter(payment__status=Payment.Status.POSTED).aggregate(
-        total=Sum("amount")
-    )["total"] or Decimal("0.0000")
-    return max(payment.amount - allocated, Decimal("0.0000"))
+    return max(payment.amount - _net_allocated(payment.allocations.all()), Decimal("0.0000"))
 
 
 @transaction.atomic
@@ -60,15 +64,8 @@ def allocate_payment(*, payment_id: int, bill_id: int, amount) -> PaymentAllocat
     if bill.bill_type != expected_bill_type:
         raise BillWiseError("Receipt must be allocated to a receivable bill and payment to a payable bill.")
 
-    allocated_payment = payment.allocations.filter(payment__status=Payment.Status.POSTED).aggregate(
-        total=Sum("amount")
-    )["total"] or Decimal("0.0000")
-    allocated_bill = bill.allocations.filter(payment__status=Payment.Status.POSTED).aggregate(
-        total=Sum("amount")
-    )["total"] or Decimal("0.0000")
-
-    payment_available = payment.amount - allocated_payment
-    bill_outstanding = bill.amount - allocated_bill
+    payment_available = payment.amount - _net_allocated(payment.allocations.all())
+    bill_outstanding = bill.amount - _net_allocated(bill.allocations.all())
 
     if amount > payment_available:
         raise BillWiseError(
@@ -79,16 +76,13 @@ def allocate_payment(*, payment_id: int, bill_id: int, amount) -> PaymentAllocat
             f"Allocation exceeds bill's outstanding amount ({bill_outstanding:.4f})."
         )
 
-    allocation, created = PaymentAllocation.objects.get_or_create(
+    allocation = PaymentAllocation.objects.create(
         payment=payment,
         bill=bill,
-        defaults={"amount": amount},
+        entry_type=PaymentAllocation.EntryType.ALLOCATE,
+        amount=amount,
     )
-    if not created:
-        new_amount = allocation.amount + amount
-        allocation.amount = new_amount
-        allocation.full_clean()
-        allocation.save(update_fields=["amount"])
+    allocation.full_clean()
 
     new_bill_outstanding = bill_outstanding - amount
     bill.status = (
@@ -102,37 +96,42 @@ def allocate_payment(*, payment_id: int, bill_id: int, amount) -> PaymentAllocat
 
 
 @transaction.atomic
-def deallocate_payment(*, allocation_id: int, amount=None) -> PaymentAllocation | None:
-    """Reverse an allocation without deleting financial history."""
-    allocation = PaymentAllocation.objects.select_for_update().select_related(
-        "payment", "bill"
-    ).get(pk=allocation_id)
+def deallocate_payment(*, allocation_id: int, amount=None) -> PaymentAllocation:
+    """Append a reversal entry; the original allocation is never deleted or edited."""
+    allocation = PaymentAllocation.objects.select_for_update().select_related("payment", "bill").get(pk=allocation_id)
     payment = Payment.objects.select_for_update().get(pk=allocation.payment_id)
     bill = BillReference.objects.select_for_update().get(pk=allocation.bill_id)
 
+    if allocation.entry_type != PaymentAllocation.EntryType.ALLOCATE:
+        raise BillWiseError("Only an allocation entry can be deallocated.")
     if amount is None:
         release = allocation.amount
     else:
         release = _money(amount)
-        if release > allocation.amount:
-            raise BillWiseError("Deallocation exceeds the existing allocation.")
 
-    remaining = allocation.amount - release
-    if remaining == 0:
-        allocation.delete()
-        result = None
-    else:
-        allocation.amount = remaining
-        allocation.save(update_fields=["amount"])
-        result = allocation
+    already_reversed = PaymentAllocation.objects.filter(
+        reference_allocation=allocation,
+        entry_type=PaymentAllocation.EntryType.DEALLOCATE,
+    ).aggregate(total=Sum("amount"))["total"] or Decimal("0.0000")
+    remaining_reversible = allocation.amount - already_reversed
+    if release > remaining_reversible:
+        raise BillWiseError("Deallocation exceeds the unreversed allocation amount.")
 
+    reversal = PaymentAllocation.objects.create(
+        payment=payment,
+        bill=bill,
+        entry_type=PaymentAllocation.EntryType.DEALLOCATE,
+        amount=release,
+        reference_allocation=allocation,
+    )
+    reversal.full_clean()
     bill.status = BillReference.Status.OPEN
     bill.save(update_fields=["status"])
-    return result
+    return reversal
 
 
 def party_outstanding(*, party_id: int) -> Decimal:
-    """Return positive receivable/payable outstanding for a party."""
+    """Return receivable outstanding minus payable outstanding for a party."""
     Party.objects.get(pk=party_id)
     receivable = sum(
         (get_bill_outstanding(bill.id) for bill in BillReference.objects.filter(
