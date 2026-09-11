@@ -42,7 +42,7 @@ class Migration(migrations.Migration):
                 ("metal_type", models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name="items", to="inventory.metaltype")),
                 ("purity", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name="items", to="inventory.purity")),
             ],
-            options={"ordering": ["code"], "indexes": [models.Index(fields=["metal_type", "purity", "is_active"], name="inventory_item_metal_purity_idx")]},
+            options={"ordering": ["code"], "indexes": [models.Index(fields=["metal_type", "purity", "is_active"], name="inv_item_metal_pur_idx")]},
         ),
         migrations.CreateModel(
             name="StockLot",
