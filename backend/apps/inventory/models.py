@@ -46,7 +46,7 @@ class Item(models.Model):
     class Meta:
         ordering = ["code"]
         indexes = [
-            models.Index(fields=["metal_type", "purity", "is_active"], name="inventory_item_metal_purity_idx"),
+            models.Index(fields=["metal_type", "purity", "is_active"], name="inv_item_metal_pur_idx"),
         ]
 
     def __str__(self):
